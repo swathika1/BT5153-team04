@@ -1,0 +1,14 @@
+**.log
+**.synctex.gz
+**.fls
+**.out
+**.out
+**.aux
+**fdb_latexmk
+**.synctex.gz
+Electronics.json.gz
+meta_Electronics.json.gz
+.DS_Store
+BT5153_ProjectGuidelines_Grading Criteria.pdf
+guideline.pdf
+**.csv
