@@ -1,0 +1,108 @@
+\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb}
+\usepackage{geometry}
+
+\usepackage{fancyhdr}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{caption}
+\captionsetup{font=small}
+\usepackage{hyperref}
+\usepackage[bottom]{footmisc}
+
+
+\geometry{margin=0.85in}
+
+\pagestyle{fancy}
+\fancyhf{} % clear all header and footer fields
+\renewcommand{\footrulewidth}{0.4pt} % adds a line at the top of the footer
+\fancyfoot[R]{\thepage} % right-aligned page number
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.2em}
+
+% Reduce space before/after itemize/enumerate
+\usepackage{enumitem}
+\setlist{itemsep=0em, topsep=0em, parsep=0em, leftmargin=2em}
+
+\title{BT5153 Applied Machine Learning for Business Analytics}
+\author{}
+\date{}
+
+\begin{document}
+
+\begin{titlepage}
+    \centering
+    \vspace*{1cm}
+    {\Huge\bfseries BT5153 Applied Machine Learning for Business Analytics\\[0.5em]}
+    {\Large Sentiment Analysis For Amazon Products\par}
+    \vspace{1.5cm}
+    \includegraphics[width=0.30\textwidth]{nus_logo.png} \\[2em]
+    \vspace{1cm}
+
+    \textbf{Group 4 Project Proposal \\}
+    \vspace{0.6cm}
+    \begin{tabular}{|>{\centering\arraybackslash}m{5cm}|>{\centering\arraybackslash}m{5cm}|}
+    \hline
+    \textbf{Name} & \textbf{Student ID} \\
+    \hline\small 
+    AWALE ANAGHA DILIP & A0319018H \\
+    \hline\small
+    ELISETTI MEGHANA & A0319162H \\   
+    \hline\small
+    KUMARAVEL SWATHIKA & A0318010Y \\ 
+    \hline\small
+    TANYA TOOLEY & A0318087X \\
+    \hline\small
+    WANG YING & A0318271H \\
+    \hline
+    \end{tabular}
+    \vspace{1cm}
+
+    {\large
+    National University of Singapore \\
+    \vspace{0.5cm}
+    Submission Date: \today
+    }
+    \vfill
+\end{titlepage}
+\thispagestyle{fancy}
+
+\subsection*{Project Intention}
+
+\subsection*{Desired Outcome}
+
+\subsection*{Data}
+
+The dataset we are using is at: \url{https://cseweb.ucsd.edu/~jmcauley/datasets/amazon_v2/}. Since it is a large dataset, we selected a category with sufficient data relevant to our project. We chose the Electronics category, which contains 22 million reviews and ratings for over 787k products. The compressed file is approximately 3GB. We retain five fields for analysis: \texttt{overall} (rating 1--5), \texttt{verified}, \texttt{asin} (product ID), \texttt{reviewText}, and \texttt{summary}. We used the complete dataset rather than the 5-core subset in order to retain full coverage before applying our own filtering criteria.
+
+Several data cleaning steps will be performed. We will remove reviews with fewer than 20 words to exclude low-content entries, which reduces the dataset from 22 million to approximately 12.3 million reviews. We will remove products with fewer than 200 reviews to ensure each product has sufficient data for meaningful analysis. We will then randomly cap at 500 reviews per product (seed=42) to prevent popular products from dominating the dataset. After cleaning, we expect approximately 3.94 million reviews across 11,000 products.
+
+\subsection*{Methods}
+
+\subsection*{Milestones}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Phase} & \textbf{Timeline} & \textbf{Key Deliverables} \\
+\midrule
+Data Collection & Week 1 & Amazon Review Datasets, Data Cleaning \\
+Preprocessing \& EDA & Week 2 & Sentiment Modeling, Exploratory Data Analysis \\
+Model Development & Weeks 3--4 & Divergence signals, trained classifiers \\
+Evaluation \& Tuning & Week 5 & Model comparison, hyperparameter tuning \\
+Report \& Presentation & Week 6 & Final report, video, dashboard prototype \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection*{Constraints}
+
+\end{document}
