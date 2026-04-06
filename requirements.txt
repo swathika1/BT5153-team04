@@ -1,0 +1,14 @@
+numpy>=1.26
+pandas>=2.2
+polars>=1.0
+scikit-learn>=1.4
+ipywidgets>=8.1
+jupyterlab>=4.2
+notebook>=7.2
+flask>=3.0
+
+# Optional topic-model stack for BERTopic cell
+bertopic>=0.16
+sentence-transformers>=3.0
+umap-learn>=0.5
+hdbscan>=0.8.33

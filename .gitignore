@@ -1,14 +1,35 @@
-**.log
-**.synctex.gz
-**.fls
-**.out
-**.out
-**.aux
-**fdb_latexmk
-**.synctex.gz
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Logs and temporary outputs
+*.log
+nb_run.log
+
+# LaTeX build artifacts
+*.synctex.gz
+*.fls
+*.out
+*.aux
+*.fdb_latexmk
+
+# OS files
+.DS_Store
+
+# Large raw source datasets (not for git)
 Electronics.json.gz
 meta_Electronics.json.gz
-.DS_Store
-BT5153_ProjectGuidelines_Grading Criteria.pdf
-guideline.pdf
-**.csv
+
+# Large generated data/artifacts (not for git)
+electronics_cleaned.csv
+electronics_filtered.csv
+electronics_metadata.csv
+X_train_emb.npy
+X_test_emb.npy
+y_train.npy
+y_test.npy
+
+# Local backups
+.venv_broken_backup/
