@@ -31,7 +31,6 @@ _EXTRA_STOP: frozenset[str] = frozenset({
 })
 ALL_STOP: frozenset[str] = frozenset(ENGLISH_STOP_WORDS) | _EXTRA_STOP
 
-# Ordered so the first matching category wins.
 _TOPIC_KEYWORDS: list[tuple[str, frozenset[str]]] = [
     ("Battery life or charging issues", frozenset({
         "battery", "charge", "charging", "charged", "dies", "dead", "drain",
@@ -70,12 +69,7 @@ _TOPIC_KEYWORDS: list[tuple[str, frozenset[str]]] = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Helpers: safe Python-native type conversion for JSON serialisation
-# ---------------------------------------------------------------------------
-
 def _safe(v: Any) -> Any:
-    """Convert numpy / pandas scalar types to plain Python types."""
     if isinstance(v, (np.integer,)):
         return int(v)
     if isinstance(v, (np.floating,)):
@@ -84,16 +78,15 @@ def _safe(v: Any) -> Any:
         return bool(v)
     if isinstance(v, (np.ndarray,)):
         return v.tolist()
-    if isinstance(v, float) and (v != v):  # NaN
+    if isinstance(v, float) and (v != v):
         return None
     return v
 
 
 def _safe_dict(d: dict) -> dict:
-    """Recursively clean a dict so jsonify never hits a numpy type."""
     out = {}
     for k, v in d.items():
-        k = str(k)  # keys must be strings for JSON; catches np.int64 keys too
+        k = str(k)
         if isinstance(v, dict):
             out[k] = _safe_dict(v)
         elif isinstance(v, list):
@@ -114,13 +107,8 @@ def interpret_topic(words: list[str]) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Data loading  (lru_cache — loaded once, reused for every request)
-# ---------------------------------------------------------------------------
-
 @lru_cache(maxsize=1)
 def load_meta() -> pd.DataFrame:
-    """Load pre-computed product metadata — fast: 11K rows, no aggregation needed."""
     if not META_FILE.exists():
         raise FileNotFoundError(f"Missing {META_FILE}")
     meta = pd.read_csv(META_FILE, dtype={"asin": "string"})
@@ -136,7 +124,6 @@ def load_meta() -> pd.DataFrame:
 
 @lru_cache(maxsize=1)
 def load_reviews() -> pd.DataFrame:
-    """Load raw review sample — only used for per-product drilldown analysis."""
     if not DATA_FILE.exists():
         raise FileNotFoundError(f"Missing {DATA_FILE}")
     reviews = pd.read_csv(
@@ -151,7 +138,6 @@ def load_reviews() -> pd.DataFrame:
 
 @lru_cache(maxsize=1)
 def get_band_avg_bad_rates() -> dict[str, float]:
-    """Mean bad_review_rate per quality_band across all ASINs present in the reviews sample."""
     reviews = load_reviews().copy()
     meta = load_meta()
     reviews["is_bad"] = reviews["overall"] <= BAD_REVIEW_THRESHOLD
@@ -170,7 +156,6 @@ def get_band_avg_bad_rates() -> dict[str, float]:
 
 
 def get_product_bad_rate(asin: str) -> float | None:
-    """Bad review rate for a single ASIN from the reviews sample, or None if absent."""
     subset = load_reviews()
     subset = subset[subset["asin"] == asin]
     if subset.empty:
@@ -192,7 +177,6 @@ def get_brand_stats(meta: pd.DataFrame) -> list[dict]:
     brands["bad_pct"] = (brands["bad_products"] / brands["products"] * 100).round(1)
     brands["avg_rating"] = brands["avg_rating"].round(2)
     result = brands.sort_values("bad_pct", ascending=False).head(15).to_dict(orient="records")
-    # Ensure all values are native Python types
     return [_safe_dict(r) for r in result]
 
 
@@ -205,14 +189,8 @@ def tokenize(text: str) -> list[str]:
     return tokens
 
 
-# Cache NMF results per ASIN — refitting NMF for every request was the main perf bottleneck
 @lru_cache(maxsize=512)
 def get_topics_for_product(asin: str, n_topics: int = 4, top_words: int = 8) -> list[list[str]] | None:
-    """Run NMF topic model on a product's bad reviews. Returns None when too few reviews.
-    
-    Result is cached: first call fits the model, subsequent calls return instantly.
-    Cache holds up to 512 ASINs — covers every realistic drilldown session.
-    """
     try:
         reviews_df = load_reviews()
         bad = reviews_df[
@@ -228,7 +206,6 @@ def get_topics_for_product(asin: str, n_topics: int = 4, top_words: int = 8) -> 
         model = NMF(n_components=k, random_state=42, max_iter=200)
         model.fit(X)
         names = vec.get_feature_names_out()
-        # Convert numpy strings → plain Python str so JSON serialisation never fails
         return [
             [str(names[i]) for i in topic.argsort()[-top_words:][::-1]]
             for topic in model.components_
@@ -240,7 +217,6 @@ def get_topics_for_product(asin: str, n_topics: int = 4, top_words: int = 8) -> 
 def get_rating_distribution(
     asin: str, avg_rating: float = 0.0, review_count: int = 0
 ) -> dict[str, int]:
-    """Return rating distribution as {str(star): count} — string keys for safe JSON."""
     reviews_df = load_reviews()
     dist = (
         reviews_df[reviews_df["asin"] == asin]["overall"]
@@ -249,7 +225,6 @@ def get_rating_distribution(
         .value_counts()
     )
     result = {str(i): int(dist.get(i, 0)) for i in range(1, 6)}
-    # Sample contained no rows for this ASIN — use metadata as a single-bar fallback.
     if all(v == 0 for v in result.values()) and review_count > 0:
         bucket = max(1, min(5, round(avg_rating)))
         result[str(bucket)] = int(review_count)
@@ -271,25 +246,18 @@ def top_bad_terms(asin: str, top_n: int = 12) -> list[str]:
     return [word for word, _ in counter.most_common(top_n)]
 
 
-# ---------------------------------------------------------------------------
-# Shared logic: build the full product payload used by both / and /api/product
-# ---------------------------------------------------------------------------
-
 def _build_product_payload(asin: str, meta: pd.DataFrame) -> dict | None:
-    """Build the complete product drilldown dict. Returns None if ASIN not found."""
     one = meta[meta["asin"] == asin]
     if one.empty:
         return None
 
-    # Start from metadata row — convert to plain-Python dict immediately
     row: dict = _safe_dict(one.iloc[0].to_dict())
 
-    topics = get_topics_for_product(asin)  # list[list[str]] or None — already plain str
+    topics = get_topics_for_product(asin)
     row["topics"] = topics or []
     row["topic_labels"] = [interpret_topic(t) for t in topics] if topics else []
     row["top_terms"] = [] if topics else top_bad_terms(asin)
 
-    # rating_dist uses string keys so JSON serialises cleanly
     row["rating_dist"] = get_rating_distribution(
         asin,
         avg_rating=float(row.get("avg_rating", 0)),
@@ -303,7 +271,6 @@ def _build_product_payload(asin: str, meta: pd.DataFrame) -> dict | None:
     row["band_avg_pct"] = round(float(band_avg) * 100, 1)
     row["vs_avg"] = "better" if (product_bad_rate is not None and product_bad_rate < band_avg) else "worse"
 
-    # Risk label (relative to band average — matches the notebook's logic)
     if product_bad_rate is None:
         row["risk_label"] = "Unknown"
     elif product_bad_rate > band_avg + 0.05:
@@ -313,7 +280,6 @@ def _build_product_payload(asin: str, meta: pd.DataFrame) -> dict | None:
     else:
         row["risk_label"] = "Low Risk"
 
-    # Composite risk score (from notebook: bad_rate * 0.5 + rating_dist * 0.3 + verified prior * 0.2)
     bad_review_rate = float(product_bad_rate) if product_bad_rate is not None else 0.0
     risk_score = round(
         (bad_review_rate * 0.5)
@@ -333,20 +299,19 @@ def _build_product_payload(asin: str, meta: pd.DataFrame) -> dict | None:
         row["risk_color"] = "#ef4444"
 
     _rec_map = {
-        "bad_product": "⚠ Avoid or investigate before purchasing. High complaint volume detected.",
-        "mid_product": "⚡ Review complaint topics before deciding. Mixed user experience reported.",
-        "good_product": "✓ Generally reliable. Complaint rate is low.",
+        "bad_product": "âš  Avoid or investigate before purchasing. High complaint volume detected.",
+        "mid_product": "âš¡ Review complaint topics before deciding. Mixed user experience reported.",
+        "good_product": "âœ“ Generally reliable. Complaint rate is low.",
     }
     row["recommendation"] = _rec_map.get(str(row.get("quality_band", "")), "")
 
-    # Topic-driven improvement recommendations (derived dynamically from NMF words)
     _kw_to_action = [
-        ({"battery", "charge", "charging", "drain", "draining", "dead", "dies"}, "🔋 Improve battery performance"),
-        ({"software", "firmware", "driver", "bug", "bugs", "crash", "freeze", "glitch", "error"}, "🛠 Fix firmware/software bugs"),
-        ({"wifi", "wireless", "bluetooth", "connect", "connection", "disconnect", "signal", "latency"}, "📶 Improve connectivity stability"),
-        ({"broke", "broken", "crack", "cracked", "flimsy", "fragile", "durability", "hinge"}, "🔩 Improve build quality & durability"),
-        ({"support", "warranty", "refund", "replacement", "return", "seller"}, "📞 Improve customer support"),
-        ({"price", "expensive", "overpriced", "value", "worth"}, "💰 Review pricing & value proposition"),
+        ({"battery", "charge", "charging", "drain", "draining", "dead", "dies"}, "ðŸ”‹ Improve battery performance"),
+        ({"software", "firmware", "driver", "bug", "bugs", "crash", "freeze", "glitch", "error"}, "ðŸ›  Fix firmware/software bugs"),
+        ({"wifi", "wireless", "bluetooth", "connect", "connection", "disconnect", "signal", "latency"}, "ðŸ“¶ Improve connectivity stability"),
+        ({"broke", "broken", "crack", "cracked", "flimsy", "fragile", "durability", "hinge"}, "ðŸ”© Improve build quality & durability"),
+        ({"support", "warranty", "refund", "replacement", "return", "seller"}, "ðŸ“ž Improve customer support"),
+        ({"price", "expensive", "overpriced", "value", "worth"}, "ðŸ’° Review pricing & value proposition"),
     ]
     all_words: set[str] = set()
     if topics:
@@ -365,40 +330,36 @@ def _build_product_payload(asin: str, meta: pd.DataFrame) -> dict | None:
     return row
 
 
-# ---------------------------------------------------------------------------
-# HTML Template
-# ---------------------------------------------------------------------------
-
 TEMPLATE = r"""
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>BT5153 · Product Quality Dashboard</title>
+  <title>BT5153 Â· Product Quality Dashboard</title>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
   <style>
     :root {
-      --bg:#f5ede0;
-      --surface:#fdf6ee;
-      --surface-soft:#faf0e4;
-      --surface-muted:#f0e4d2;
-      --border:#ddc9b0;
-      --border-strong:#c8ae90;
-      --text:#2c1f0e;
-      --muted:#7a6248;
-      --muted-soft:#9e8066;
-      --accent:#7b4f2e;
-      --accent-soft:rgba(123,79,46,0.10);
-      --accent-soft-2:rgba(123,79,46,0.18);
-      --bad:#b84040;
-      --mid:#a0732a;
-      --good:#3d7a56;
-      --shadow-sm:0 1px 2px rgba(60,30,10,0.06),0 6px 18px rgba(60,30,10,0.05);
-      --shadow-md:0 10px 30px rgba(60,30,10,0.10),0 2px 8px rgba(60,30,10,0.06);
-      --shadow-lg:0 18px 44px rgba(60,30,10,0.13),0 6px 18px rgba(60,30,10,0.07);
+      --bg:#eef3f7;
+      --surface:#ffffff;
+      --surface-soft:#f7fafc;
+      --surface-muted:#edf3f7;
+      --border:#cfd9e4;
+      --border-strong:#b8c6d4;
+      --text:#1f2937;
+      --muted:#66768a;
+      --muted-soft:#8a98a9;
+      --accent:#2f6f8c;
+      --accent-soft:rgba(53,109,140,0.10);
+      --accent-soft-2:rgba(53,109,140,0.16);
+      --bad:#c65a5a;
+      --mid:#b7863d;
+      --good:#4c8b6b;
+      --shadow-sm:0 1px 2px rgba(15,23,42,0.05),0 6px 18px rgba(15,23,42,0.04);
+      --shadow-md:0 10px 30px rgba(15,23,42,0.08),0 2px 8px rgba(15,23,42,0.05);
+      --shadow-lg:0 18px 44px rgba(15,23,42,0.10),0 6px 18px rgba(15,23,42,0.06);
       --radius-sm:10px;
       --radius-md:14px;
       --radius-lg:18px;
@@ -416,7 +377,10 @@ TEMPLATE = r"""
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
     html{scroll-behavior:smooth;}
     body{
-      background:linear-gradient(180deg,#f5ede0 0%,#eee0cc 100%);
+      background:
+        radial-gradient(circle at top left, rgba(47,111,140,0.10), transparent 28%),
+        radial-gradient(circle at top right, rgba(47,111,140,0.08), transparent 24%),
+        linear-gradient(180deg,#eef3f7 0%,#e8eef4 36%,#f3f6f9 100%);
       color:var(--text);
       font-family:'DM Sans',system-ui,sans-serif;
       font-size:16px;
@@ -424,46 +388,48 @@ TEMPLATE = r"""
       min-height:100vh;
     }
     ::-webkit-scrollbar{width:8px;height:8px;}
-    ::-webkit-scrollbar-track{background:#ecdfc9;}
-    ::-webkit-scrollbar-thumb{background:#c8ae90;border-radius:999px;}
+    ::-webkit-scrollbar-track{background:#eef2f6;}
+    ::-webkit-scrollbar-thumb{background:#c5d0db;border-radius:999px;}
 
     .project-banner{
-      background:linear-gradient(160deg,#3d2010 0%,#6b3a1f 60%,#8b5230 100%);
-      color:#fdf6ee;
+      background:
+      linear-gradient(135deg, rgba(47,111,140,0.12) 0%, rgba(47,111,140,0.06) 32%, rgba(255,255,255,0.42) 100%),
+      linear-gradient(180deg,#e7edf4 0%,#dde6ef 100%);
+      color:var(--text);
       padding:56px 40px 42px;
-      border-bottom:1px solid #5a2e10;
+      border-bottom:1px solid var(--border);
     }
     .project-banner-inner{max-width:1380px;margin:0 auto;display:flex;flex-direction:column;gap:24px;}
     .project-banner-top{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;flex-wrap:wrap;}
-    .project-title{font-size:clamp(2rem,1.8rem + 1vw,2.7rem);font-weight:800;letter-spacing:-0.04em;line-height:1.15;color:#fdf6ee;}
-    .project-subtitle{font-size:1.02rem;color:rgba(253,246,238,0.72);margin-top:10px;max-width:78ch;}
+    .project-title{font-size:clamp(2rem,1.8rem + 1vw,2.7rem);font-weight:800;letter-spacing:-0.04em;line-height:1.15;}
+    .project-subtitle{font-size:1.02rem;color:var(--muted);margin-top:10px;max-width:78ch;}
     .project-github{
       display:inline-flex;align-items:center;gap:10px;
-      background:rgba(253,246,238,0.12);border:1px solid rgba(253,246,238,0.28);
-      border-radius:999px;padding:12px 20px;color:#fdf6ee;text-decoration:none;
+      background:linear-gradient(180deg,#ffffff 0%,#f6fafc 100%);border:1px solid var(--border);
+      border-radius:999px;padding:12px 20px;color:var(--text);text-decoration:none;
       font-size:14px;font-weight:700;transition:all .18s ease;white-space:nowrap;
       box-shadow:var(--shadow-sm);
     }
-    .project-github:hover{background:rgba(253,246,238,0.22);border-color:rgba(253,246,238,0.45);text-decoration:none;transform:translateY(-1px);}
+    .project-github:hover{background:var(--surface-soft);border-color:var(--border-strong);text-decoration:none;transform:translateY(-1px);}
     .project-team{display:flex;flex-wrap:wrap;gap:12px;}
     .team-chip{
-      background:rgba(253,246,238,0.12);border:1px solid rgba(253,246,238,0.25);
+      background:rgba(255,255,255,0.65);border:1px solid var(--border);
       border-radius:999px;padding:10px 16px;font-size:13px;font-weight:600;
-      color:#fdf6ee;box-shadow:var(--shadow-sm);
+      color:var(--text);box-shadow:var(--shadow-sm);
     }
-    .team-chip .team-id{color:rgba(253,246,238,0.60);font-size:11px;font-family:'DM Mono',monospace;margin-left:8px;}
+    .team-chip .team-id{color:var(--muted);font-size:11px;font-family:'DM Mono',monospace;margin-left:8px;}
 
     .header{
-      position:sticky;top:0;z-index:100;background:rgba(245,237,224,0.94);
+      position:sticky;top:0;z-index:100;background:rgba(239,244,248,0.94);
       backdrop-filter:blur(14px);border-bottom:1px solid var(--border);
       padding:0 40px;height:76px;display:flex;align-items:center;justify-content:space-between;
-      box-shadow:0 1px 0 rgba(255,245,235,0.8);
+      box-shadow:0 1px 0 rgba(255,255,255,0.7);
     }
     .header-brand{display:flex;align-items:center;gap:14px;}
     .header-logo{
-      width:42px;height:42px;border-radius:13px;background:var(--accent);
+      width:42px;height:42px;border-radius:13px;background:linear-gradient(180deg, #3d7f9e 0%, #2f6f8c 100%);
       display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:900;
-      color:#fff;box-shadow:0 10px 20px rgba(123,79,46,0.28);flex-shrink:0;
+      color:#fff;box-shadow:0 10px 20px rgba(53,109,140,0.22);flex-shrink:0;
     }
     .header-title{font-size:1.08rem;font-weight:800;letter-spacing:-0.02em;color:var(--text);}
     .header-sub{font-size:13px;color:var(--muted);margin-top:2px;}
@@ -473,11 +439,11 @@ TEMPLATE = r"""
       box-shadow:var(--shadow-sm);
     }
 
-    .wrap{max-width:1380px;margin:0 auto;padding:40px 28px 100px;display:flex;flex-direction:column;gap:32px;}
+    .wrap{max-width:1380px;margin:0 auto;padding:44px 28px 110px;display:flex;flex-direction:column;gap:34px;}
 
     .card{
-      background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-xl);
-      padding:32px;position:relative;box-shadow:var(--shadow-sm);
+      background:linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(250,252,253,0.98) 100%);border:1px solid var(--border);border-radius:var(--radius-xl);
+      padding:34px;position:relative;box-shadow:var(--shadow-md);
     }
 
     .section-title{
@@ -488,9 +454,9 @@ TEMPLATE = r"""
 
     .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:22px;}
     .kpi{
-      background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);
+      background:linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(248,250,252,0.98) 100%);border:1px solid var(--border);border-radius:var(--radius-lg);
       padding:28px;position:relative;overflow:hidden;transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease;
-      cursor:default;box-shadow:var(--shadow-sm);min-height:164px;
+      cursor:default;box-shadow:var(--shadow-md);min-height:164px;
     }
     .kpi:hover{transform:translateY(-3px);box-shadow:var(--shadow-md);border-color:var(--border-strong);}
     .kpi-glow{position:absolute;top:-36px;right:-36px;width:124px;height:124px;border-radius:50%;opacity:0.10;}
@@ -503,7 +469,7 @@ TEMPLATE = r"""
 
     .filter-bar{
       display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:18px;align-items:end;
-      background:var(--surface-soft);border:1px solid var(--border);border-radius:var(--radius-lg);
+      background:linear-gradient(180deg, rgba(247,250,252,0.96) 0%, rgba(241,246,250,0.96) 100%);border:1px solid var(--border);border-radius:var(--radius-lg);
       padding:24px;margin-bottom:24px;
     }
     .filter-group{display:flex;flex-direction:column;gap:8px;min-width:0;}
@@ -512,20 +478,20 @@ TEMPLATE = r"""
     }
     .filter-bar input,.filter-bar select,.asin-input{
       width:100%;padding:13px 15px;border-radius:12px;border:1px solid var(--border-strong);
-      background:#fdf6ee;color:var(--text);font-size:14px;font-family:'DM Sans',sans-serif;outline:none;
+      background:#fff;color:var(--text);font-size:14px;font-family:'DM Sans',sans-serif;outline:none;
       transition:border-color .18s ease,box-shadow .18s ease,background .18s ease;
       min-height:48px;
     }
     .asin-input{font-family:'DM Mono',monospace;max-width:340px;}
     .filter-bar input:focus,.filter-bar select:focus,.asin-input:focus{
-      border-color:var(--accent);box-shadow:0 0 0 4px rgba(123,79,46,0.12);background:#fdf6ee;
+      border-color:var(--accent);box-shadow:0 0 0 4px rgba(53,109,140,0.12);background:#fff;
     }
     .btn{
       padding:13px 22px;border-radius:12px;background:var(--accent);color:#fff;border:0;cursor:pointer;
       font-size:14px;font-weight:800;font-family:'DM Sans',sans-serif;transition:all .16s ease;
-      white-space:nowrap;box-shadow:0 10px 18px rgba(123,79,46,0.22);min-height:48px;
+      white-space:nowrap;box-shadow:0 10px 18px rgba(53,109,140,0.20);min-height:48px;
     }
-    .btn:hover{background:#5e3519;transform:translateY(-1px);box-shadow:0 14px 24px rgba(123,79,46,0.30);}
+    .btn:hover{background:#2f627d;transform:translateY(-1px);box-shadow:0 14px 24px rgba(53,109,140,0.24);}
     .btn:active{transform:translateY(0);}
     .btn:disabled{opacity:0.55;cursor:not-allowed;transform:none;box-shadow:none;}
     .btn-ghost{background:var(--surface);border:1px solid var(--border);color:var(--muted);box-shadow:none;}
@@ -537,16 +503,17 @@ TEMPLATE = r"""
     }
     table{width:100%;border-collapse:collapse;background:var(--surface);}
     thead th{
-      background:#ecdfc9;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:0.08em;
+      background:#edf3f7;color:var(--muted);
+      font-size:12px;text-transform:uppercase;letter-spacing:0.08em;
       font-weight:800;padding:16px 18px;position:sticky;top:0;z-index:2;border-bottom:1px solid var(--border);white-space:nowrap;
     }
     tbody tr{transition:background .12s ease;}
-    tbody tr:nth-child(odd){background:#fdf6ee;}
-    tbody tr:nth-child(even){background:#faf0e4;}
-    tbody tr:hover{background:rgba(123,79,46,0.07);}
-    td{padding:16px 18px;font-size:15px;border-bottom:1px solid #e0ccb4;vertical-align:middle;}
+    tbody tr:nth-child(odd){background:#fff;}
+    tbody tr:nth-child(even){background:#f5f8fb;}
+    tbody tr:hover{background:rgba(53,109,140,0.05);}
+    td{padding:16px 18px;font-size:15px;border-bottom:1px solid #edf2f7;vertical-align:middle;}
     .asin-link{color:var(--accent);cursor:pointer;font-weight:700;font-family:'DM Mono',monospace;font-size:13px;background:none;border:none;text-decoration:none;transition:color .15s;padding:0;}
-    .asin-link:hover{color:#5e3519;text-decoration:underline;}
+    .asin-link:hover{color:#2f627d;text-decoration:underline;}
 
     .badge,.meta-chip,.rec-chip,.risk-label-badge,.risk-level-badge,.vs-chip{
       display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;font-size:12px;font-weight:800;white-space:nowrap;
@@ -554,8 +521,8 @@ TEMPLATE = r"""
     .badge-bad{background:rgba(198,90,90,0.10);color:var(--bad);border:1px solid rgba(198,90,90,0.22);}
     .badge-mid{background:rgba(183,134,61,0.11);color:var(--mid);border:1px solid rgba(183,134,61,0.22);}
     .badge-good{background:rgba(76,139,107,0.11);color:var(--good);border:1px solid rgba(76,139,107,0.22);}
-    .badge-blue{background:var(--accent-soft);color:var(--accent);border:1px solid rgba(123,79,46,0.22);}
-    .badge-purple{background:var(--accent-soft);color:var(--accent);border:1px solid rgba(123,79,46,0.22);}
+    .badge-blue{background:var(--accent-soft);color:var(--accent);border:1px solid rgba(53,109,140,0.20);}
+    .badge-purple{background:var(--accent-soft);color:var(--accent);border:1px solid rgba(53,109,140,0.20);}
 
     #drilldown-panel{display:none;animation:slideIn .25s ease;}
     #drilldown-panel.visible{display:block;}
@@ -566,12 +533,12 @@ TEMPLATE = r"""
     .meta-chip{font-size:13px;color:var(--muted);background:var(--surface-muted);border:1px solid var(--border);font-weight:600;}
 
     .risk-section{
-      background:var(--surface-soft);border:1px solid var(--border);border-radius:var(--radius-lg);
+      background:linear-gradient(180deg, rgba(247,250,252,0.96) 0%, rgba(241,246,250,0.96) 100%);border:1px solid var(--border);border-radius:var(--radius-lg);
       padding:28px;margin-bottom:26px;
     }
     .risk-header{display:flex;align-items:center;gap:16px;margin-bottom:20px;flex-wrap:wrap;}
     .risk-score-big{font-size:3rem;font-weight:900;letter-spacing:-0.05em;line-height:1;}
-    .risk-bar-track{height:12px;border-radius:999px;background:#ddc9b0;overflow:hidden;max-width:620px;margin-top:6px;}
+    .risk-bar-track{height:12px;border-radius:999px;background:#dde6ee;overflow:hidden;max-width:620px;margin-top:6px;}
     .risk-bar-fill{height:100%;border-radius:999px;transition:width .7s cubic-bezier(.4,0,.2,1);}
     .risk-breakdown{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:20px;margin-top:22px;padding-top:22px;border-top:1px solid var(--border);}
     .risk-stat{display:flex;flex-direction:column;gap:6px;}
@@ -581,21 +548,21 @@ TEMPLATE = r"""
 
     .topic-grid{display:flex;flex-direction:column;gap:16px;}
     .topic-card{
-      background:var(--surface-soft);border:1px solid var(--border);border-radius:14px;
+      background:linear-gradient(180deg, rgba(247,250,252,0.96) 0%, rgba(241,246,250,0.96) 100%);border:1px solid var(--border);border-radius:14px;
       padding:18px 20px;box-shadow:none;
     }
     .topic-num{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px;font-weight:800;}
     .topic-words{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;}
-    .topic-word{background:rgba(123,79,46,0.09);color:var(--accent);border:1px solid rgba(123,79,46,0.18);border-radius:999px;padding:5px 11px;font-size:13px;font-weight:700;}
+    .topic-word{background:rgba(53,109,140,0.08);color:var(--accent);border:1px solid rgba(53,109,140,0.16);border-radius:999px;padding:5px 11px;font-size:13px;font-weight:700;}
     .topic-interp{font-size:13px;color:var(--muted);font-style:italic;}
 
     .rec-section{margin-top:18px;padding-top:18px;border-top:1px solid var(--border);}
     .rec-chips{display:flex;flex-wrap:wrap;gap:10px;}
-    .rec-chip{background:var(--accent-soft);color:var(--accent);border:1px solid rgba(123,79,46,0.20);padding:8px 14px;font-size:13px;font-weight:700;}
+    .rec-chip{background:var(--accent-soft);color:var(--accent);border:1px solid rgba(53,109,140,0.18);padding:8px 14px;font-size:13px;font-weight:700;}
 
     .chart-row{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(260px,340px);gap:22px;margin-top:24px;align-items:start;}
     .chart-box,.insight-box,.compare-card,.xai-step{
-      background:var(--surface-soft);border:1px solid var(--border);border-radius:var(--radius-lg);
+      background:linear-gradient(180deg, rgba(247,250,252,0.96) 0%, rgba(241,246,250,0.96) 100%);border:1px solid var(--border);border-radius:var(--radius-lg);
       box-shadow:none;
     }
     .chart-box{padding:24px;min-width:0;}
@@ -605,43 +572,23 @@ TEMPLATE = r"""
     .insight-box{padding:24px;min-width:0;}
     .worst-brand-row{display:flex;align-items:center;gap:12px;padding:13px 0;border-bottom:1px solid var(--border);}
     .worst-brand-row:last-child{border-bottom:none;}
-    .rank-num{width:28px;height:28px;border-radius:50%;background:rgba(184,64,64,0.10);color:var(--bad);font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0;border:1px solid rgba(184,64,64,0.18);}
-    .brand-bar-outer{flex:1;height:8px;background:#ddc9b0;border-radius:999px;overflow:hidden;}
+    .rank-num{width:28px;height:28px;border-radius:50%;background:rgba(198,90,90,0.10);color:var(--bad);font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0;border:1px solid rgba(198,90,90,0.16);}
+    .brand-bar-outer{flex:1;height:8px;background:#dfe7ee;border-radius:999px;overflow:hidden;}
     .brand-bar-inner{height:100%;background:var(--bad);border-radius:999px;}
 
     .compare-row{display:flex;gap:16px;flex-wrap:wrap;align-items:end;margin-bottom:28px;}
     .compare-input-group{display:flex;flex-direction:column;gap:8px;min-width:220px;}
     .compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px;}
-    .compare-card{
-      padding:24px 26px;display:flex;flex-direction:column;gap:18px;
-      background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius-lg);
-      transition:border-color .18s ease,box-shadow .18s ease;
-    }
-    .compare-card.winner{
-      border-color:rgba(61,122,86,.40);
-      background:linear-gradient(160deg,#fdf6ee 0%,#f0f7f3 100%);
-      box-shadow:0 0 0 3px rgba(61,122,86,.10),var(--shadow-sm);
-    }
-    .compare-card-name{
-      font-size:15px;font-weight:800;line-height:1.5;
-      white-space:normal;overflow:visible;text-overflow:unset;
-      color:var(--text);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;
-    }
-    .compare-card-asin{
-      font-family:'DM Mono',monospace;font-size:11.5px;color:var(--muted);
-      margin-top:6px;padding-top:8px;border-top:1px solid var(--border);
-      display:flex;flex-wrap:wrap;gap:6px;align-items:center;line-height:1.8;
-    }
+    .compare-card{padding:24px 26px;display:flex;flex-direction:column;gap:18px;transition:border-color .18s ease,box-shadow .18s ease,transform .18s ease;}
+    .compare-card.winner{border-color:rgba(76,139,107,.35);background:rgba(76,139,107,.05);box-shadow:0 0 0 3px rgba(76,139,107,.08);}
+    .compare-card-name{font-size:15px;font-weight:800;line-height:1.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text);}
+    .compare-card-asin{font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);margin-top:4px;}
     .compare-metrics{display:flex;gap:22px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:18px;}
     .compare-metric{display:flex;flex-direction:column;gap:4px;}
-    .compare-metric-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.07em;font-weight:700;}
     .compare-metric-val{font-size:1.55rem;font-weight:800;letter-spacing:-.03em;}
     .compare-win-tag{font-size:11px;font-weight:800;color:var(--good);margin-top:2px;}
     .compare-rec{font-size:14px;font-style:italic;padding-top:4px;line-height:1.6;}
-    .compare-best-label{
-      font-size:13px;font-weight:800;color:var(--good);
-      border-top:1px solid rgba(61,122,86,.22);padding-top:12px;
-    }
+    .compare-best-label{font-size:13px;font-weight:800;color:var(--good);border-top:1px solid rgba(76,139,107,.2);padding-top:12px;}
     .compare-vs{display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;color:var(--muted);align-self:center;padding:0 4px;}
     .compare-empty{text-align:center;padding:44px 20px;color:var(--muted);font-size:15px;background:var(--surface-soft);border:1px dashed var(--border-strong);border-radius:var(--radius-lg);}
 
@@ -650,21 +597,21 @@ TEMPLATE = r"""
     .xai-header-title::after{content:'';flex:1;height:1px;background:var(--border);}
     .xai-steps{display:flex;flex-direction:column;gap:16px;}
     .xai-step{display:flex;gap:18px;align-items:flex-start;padding:20px 22px;}
-    .xai-step-num{width:34px;height:34px;border-radius:50%;background:var(--accent-soft);border:1px solid rgba(123,79,46,0.22);color:var(--accent);font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px;}
+    .xai-step-num{width:34px;height:34px;border-radius:50%;background:var(--accent-soft);border:1px solid rgba(53,109,140,0.20);color:var(--accent);font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px;}
     .xai-step-text{font-size:15px;color:var(--muted);line-height:1.8;}
     .xai-step-text strong{color:var(--text);}
 
     .spinner{width:22px;height:22px;border-radius:50%;border:2px solid var(--border-strong);border-top-color:var(--accent);animation:spin .7s linear infinite;flex-shrink:0;}
     @keyframes spin{to{transform:rotate(360deg);}}
     #toast{
-      position:fixed;bottom:28px;right:28px;background:var(--surface);border:1px solid var(--border);
+      position:fixed;bottom:28px;right:28px;background:linear-gradient(180deg,#ffffff 0%,#f8fbfd 100%);border:1px solid var(--border);
       border-radius:14px;padding:14px 18px;font-size:14px;color:var(--text);box-shadow:var(--shadow-lg);
       transform:translateY(80px);opacity:0;transition:all .3s ease;z-index:9999;display:flex;align-items:center;gap:12px;
     }
     #toast.show{transform:translateY(0);opacity:1;}
     .asin-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;}
     .drilldown-empty{
-      text-align:center;padding:72px 24px;color:var(--muted);background:var(--surface-soft);
+      text-align:center;padding:72px 24px;color:var(--muted);background:linear-gradient(180deg, rgba(247,250,252,0.96) 0%, rgba(241,246,250,0.96) 100%);
       border:1px dashed var(--border-strong);border-radius:var(--radius-lg);
     }
     .drilldown-empty-icon{font-size:3.2rem;margin-bottom:16px;}
@@ -694,13 +641,12 @@ TEMPLATE = r"""
 </head>
 <body>
 
-<!-- PROJECT BANNER -->
 <div class="project-banner">
   <div class="project-banner-inner">
     <div class="project-banner-top">
       <div>
-        <div class="project-title">🛒 Amazon Electronics Quality Dashboard</div>
-        <div class="project-subtitle">BT5153 Group 4 &nbsp;·&nbsp; NUS Business Analytics AY25/26 S2 &nbsp;·&nbsp; Complaint Detection via NMF Topic Modelling</div>
+        <div class="project-title">ðŸ›’ Amazon Electronics Quality Dashboard</div>
+        <div class="project-subtitle">BT5153 Group 4 &nbsp;Â·&nbsp; NUS Business Analytics AY25/26 S2 &nbsp;Â·&nbsp; Complaint Detection via NMF Topic Modelling</div>
       </div>
       <a class="project-github" href="https://github.com/swathika1/BT5153-team04" target="_blank" rel="noopener">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.17 6.839 9.49.5.09.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.647.35-1.087.636-1.337-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.268 2.75 1.026A9.578 9.578 0 0112 6.836a9.59 9.59 0 012.504.337c1.909-1.294 2.747-1.026 2.747-1.026.546 1.377.202 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.167 22 16.418 22 12c0-5.523-4.477-10-10-10z"/></svg>
@@ -722,7 +668,7 @@ TEMPLATE = r"""
     <div class="header-logo">Q</div>
     <div>
       <div class="header-title">Product Quality Dashboard</div>
-      <div class="header-sub">BT5153 Group 4 &nbsp;·&nbsp; Amazon Electronics Analysis</div>
+      <div class="header-sub">BT5153 Group 4 &nbsp;Â·&nbsp; Amazon Electronics Analysis</div>
     </div>
   </div>
   <span class="header-badge">NUS AY25/26 S2</span>
@@ -730,7 +676,6 @@ TEMPLATE = r"""
 
 <div class="wrap">
 
-  <!-- KPI STRIP -->
   <div class="kpi-grid">
     <div class="kpi">
       <div class="kpi-glow" style="background:#356d8c"></div>
@@ -742,13 +687,13 @@ TEMPLATE = r"""
       <div class="kpi-glow" style="background:#c65a5a"></div>
       <div class="kpi-label">Bad Products</div>
       <div class="kpi-val" style="color:#c65a5a">{{ kpis.bad_products }}</div>
-      <div class="kpi-sub">avg rating ≤ 2.0★</div>
+      <div class="kpi-sub">avg rating â‰¤ 2.0â˜…</div>
     </div>
     <div class="kpi">
       <div class="kpi-glow" style="background:#4c8b6b"></div>
       <div class="kpi-label">Good Products</div>
       <div class="kpi-val" style="color:#4c8b6b">{{ kpis.good_products }}</div>
-      <div class="kpi-sub">avg rating ≥ 4.0★</div>
+      <div class="kpi-sub">avg rating â‰¥ 4.0â˜…</div>
     </div>
     <div class="kpi">
       <div class="kpi-glow" style="background:#b7863d"></div>
@@ -760,35 +705,32 @@ TEMPLATE = r"""
       <div class="kpi-glow" style="background:#356d8c"></div>
       <div class="kpi-label">Mid-tier Products</div>
       <div class="kpi-val" style="color:#356d8c">{{ kpis.mid_products }}</div>
-      <div class="kpi-sub">avg rating 2–4★</div>
+      <div class="kpi-sub">avg rating 2â€“4â˜…</div>
     </div>
   </div>
 
-  <!-- GLOBAL INSIGHTS -->
   <div class="card">
-    <div class="section-title">🌐 Global Insights</div>
+    <div class="section-title">ðŸŒ Global Insights</div>
     <div class="insight-grid" id="global-insights-content">
       <div style="display:flex;align-items:center;gap:12px;padding:16px;color:var(--muted);font-size:14px;">
-        <div class="spinner"></div><span>Loading insights…</span>
+        <div class="spinner"></div><span>Loading insightsâ€¦</span>
       </div>
     </div>
   </div>
 
-  <!-- CHARTS ROW -->
   <div class="two-col">
     <div class="two-col-main card">
-      <div class="section-title">📊 Top 15 Brands by Bad Product Rate</div>
+      <div class="section-title">ðŸ“Š Top 15 Brands by Bad Product Rate</div>
       <div class="brand-chart-wrap"><canvas id="brandChart"></canvas></div>
     </div>
     <div class="two-col-side card">
-      <div class="section-title">🏷 Quality Distribution</div>
+      <div class="section-title">ðŸ· Quality Distribution</div>
       <canvas id="qualityChart"></canvas>
     </div>
   </div>
 
-  <!-- PRODUCT TABLE -->
   <div class="card">
-    <div class="section-title">📋 Product Catalogue</div>
+    <div class="section-title">ðŸ“‹ Product Catalogue</div>
     <form method="get" class="filter-bar">
       <div class="filter-group">
         <span class="filter-label">Quality Band</span>
@@ -800,11 +742,11 @@ TEMPLATE = r"""
       </div>
       <div class="filter-group">
         <span class="filter-label">Brand</span>
-        <input name="brand" value="{{ selected.brand }}" placeholder="contains…" style="width:130px"/>
+        <input name="brand" value="{{ selected.brand }}" placeholder="containsâ€¦" style="width:130px"/>
       </div>
       <div class="filter-group">
         <span class="filter-label">Title</span>
-        <input name="title" value="{{ selected.title }}" placeholder="contains…" style="width:160px"/>
+        <input name="title" value="{{ selected.title }}" placeholder="containsâ€¦" style="width:160px"/>
       </div>
       <div class="filter-group">
         <span class="filter-label">Sort By</span>
@@ -841,13 +783,13 @@ TEMPLATE = r"""
             <td style="text-align:right;font-variant-numeric:tabular-nums;">{{ r.reviews }}</td>
             <td style="text-align:right;font-variant-numeric:tabular-nums;">
               <span style="font-weight:700;color:{% if r.avg_rating <= 2 %}#c65a5a{% elif r.avg_rating >= 4 %}#4c8b6b{% else %}#b7863d{% endif %};">
-                {{ r.avg_rating }}★
+                {{ r.avg_rating }}â˜…
               </span>
             </td>
             <td>
-              {% if r.quality_band == 'bad_product' %}<span class="badge badge-bad">● Bad</span>
-              {% elif r.quality_band == 'good_product' %}<span class="badge badge-good">● Good</span>
-              {% else %}<span class="badge badge-mid">● Mid</span>{% endif %}
+              {% if r.quality_band == 'bad_product' %}<span class="badge badge-bad">â— Bad</span>
+              {% elif r.quality_band == 'good_product' %}<span class="badge badge-good">â— Good</span>
+              {% else %}<span class="badge badge-mid">â— Mid</span>{% endif %}
             </td>
           </tr>
           {% endfor %}
@@ -856,17 +798,16 @@ TEMPLATE = r"""
     </div>
   </div>
 
-  <!-- PRODUCT COMPARISON -->
   <div class="card">
-    <div class="section-title">⚖️ Product Comparison</div>
+    <div class="section-title">âš–ï¸ Product Comparison</div>
     <div class="compare-row">
       <div class="compare-input-group">
-        <span class="compare-input-label">Product A — ASIN</span>
+        <span class="compare-input-label">Product A â€” ASIN</span>
         <input class="asin-input" id="cmp-asin1" placeholder="e.g. B000XXXXXX" style="max-width:260px;"/>
       </div>
       <div class="compare-vs" style="padding-bottom:2px;font-size:15px;">VS</div>
       <div class="compare-input-group">
-        <span class="compare-input-label">Product B — ASIN</span>
+        <span class="compare-input-label">Product B â€” ASIN</span>
         <input class="asin-input" id="cmp-asin2" placeholder="e.g. B001XXXXXX" style="max-width:260px;"/>
       </div>
       <button class="btn" id="cmp-btn" onclick="runCompare()">Compare</button>
@@ -877,71 +818,67 @@ TEMPLATE = r"""
     </div>
   </div>
 
-  <!-- HOW THE MODEL WORKS — always visible -->
   <div class="card">
     <div class="xai-header">
-      <span class="xai-header-title">🧠 How the Model Works (Explainable AI)</span>
+      <span class="xai-header-title">ðŸ§  How the Model Works (Explainable AI)</span>
     </div>
     <div class="xai-steps">
       <div class="xai-step">
         <div class="xai-step-num">1</div>
-        <div class="xai-step-text"><strong>Only bad reviews are used.</strong> Reviews rated 2★ or below are isolated. This focuses the model exclusively on complaint signal, avoiding dilution from positive feedback.</div>
+        <div class="xai-step-text"><strong>Only bad reviews are used.</strong> Reviews rated 2â˜… or below are isolated. This focuses the model exclusively on complaint signal, avoiding dilution from positive feedback.</div>
       </div>
       <div class="xai-step">
         <div class="xai-step-num">2</div>
-        <div class="xai-step-text"><strong>TF-IDF converts text into numbers.</strong> Each review becomes a numerical vector. Words that appear frequently in a product's complaints but rarely across all reviews score highest — surfacing product-specific issues.</div>
+        <div class="xai-step-text"><strong>TF-IDF converts text into numbers.</strong> Each review becomes a numerical vector. Words that appear frequently in a product's complaints but rarely across all reviews score highest â€” surfacing product-specific issues.</div>
       </div>
       <div class="xai-step">
         <div class="xai-step-num">3</div>
-        <div class="xai-step-text"><strong>NMF extracts complaint topics.</strong> Non-negative Matrix Factorization groups co-occurring words into coherent themes (e.g. battery + charging + drain → Battery Issues) without requiring any labelled training data.</div>
+        <div class="xai-step-text"><strong>NMF extracts complaint topics.</strong> Non-negative Matrix Factorization groups co-occurring words into coherent themes (e.g. battery + charging + drain â†’ Battery Issues) without requiring any labelled training data.</div>
       </div>
       <div class="xai-step">
         <div class="xai-step-num">4</div>
-        <div class="xai-step-text"><strong>A composite risk score is computed.</strong> Blends bad review rate (50%), distance from 5★ (30%), and a neutral verified-purchase prior (20%). Below 0.3 = <span style="color:var(--good);font-weight:700;">LOW RISK</span>, 0.3–0.6 = <span style="color:var(--mid);font-weight:700;">MEDIUM RISK</span>, above 0.6 = <span style="color:var(--bad);font-weight:700;">HIGH RISK</span>.</div>
+        <div class="xai-step-text"><strong>A composite risk score is computed.</strong> Blends bad review rate (50%), distance from 5â˜… (30%), and a neutral verified-purchase prior (20%). Below 0.3 = <span style="color:var(--good);font-weight:700;">LOW RISK</span>, 0.3â€“0.6 = <span style="color:var(--mid);font-weight:700;">MEDIUM RISK</span>, above 0.6 = <span style="color:var(--bad);font-weight:700;">HIGH RISK</span>.</div>
       </div>
     </div>
   </div>
 
-  <!-- PRODUCT DRILLDOWN -->
   <div class="card" id="drilldown-card">
-    <div class="section-title">🔍 Product Drilldown</div>
+    <div class="section-title">ðŸ” Product Drilldown</div>
 
     <div class="asin-row" style="margin-bottom:28px;">
-      <input class="asin-input" id="asin-input" placeholder="Enter ASIN e.g. B000…" value="{{ selected.asin }}"/>
+      <input class="asin-input" id="asin-input" placeholder="Enter ASIN e.g. B000â€¦" value="{{ selected.asin }}"/>
       <button class="btn" id="inspect-btn" onclick="inspectFromInput()">Inspect</button>
       <div class="spinner" id="drilldown-spinner" style="display:none;"></div>
     </div>
 
     <div class="drilldown-empty" id="drilldown-empty">
-      <div class="drilldown-empty-icon">🔭</div>
+      <div class="drilldown-empty-icon">ðŸ”­</div>
       <div style="font-size:15px;">Click any ASIN from the table, or enter one above and press <strong>Inspect</strong></div>
       <div style="font-size:13px;margin-top:8px;color:var(--muted);">Risk scores, complaint themes, and improvement suggestions will appear here</div>
     </div>
 
     <div id="drilldown-panel">
-      <!-- Header -->
       <div class="drilldown-header">
         <div style="flex:1;min-width:0;">
-          <div class="drilldown-title" id="dd-title">—</div>
+          <div class="drilldown-title" id="dd-title">â€”</div>
           <div class="drilldown-meta">
-            <span class="meta-chip" id="dd-asin">—</span>
-            <span class="meta-chip" id="dd-brand">—</span>
-            <span class="meta-chip" id="dd-reviews">—</span>
+            <span class="meta-chip" id="dd-asin">â€”</span>
+            <span class="meta-chip" id="dd-brand">â€”</span>
+            <span class="meta-chip" id="dd-reviews">â€”</span>
             <span id="dd-quality-badge"></span>
           </div>
         </div>
-        <button class="btn btn-ghost" onclick="closeDrilldown()" style="white-space:nowrap;flex-shrink:0;">✕ Close</button>
+        <button class="btn btn-ghost" onclick="closeDrilldown()" style="white-space:nowrap;flex-shrink:0;">âœ• Close</button>
       </div>
 
-      <!-- Risk Section -->
       <div class="risk-section">
         <div class="risk-header">
           <div>
             <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px;">Composite Risk Score</div>
-            <div class="risk-score-big" id="dd-risk-score">—</div>
+            <div class="risk-score-big" id="dd-risk-score">â€”</div>
           </div>
-          <span class="risk-level-badge" id="dd-risk-level">—</span>
-          <span class="risk-label-badge" id="dd-risk-label">—</span>
+          <span class="risk-level-badge" id="dd-risk-level">â€”</span>
+          <span class="risk-label-badge" id="dd-risk-label">â€”</span>
         </div>
         <div class="risk-bar-track">
           <div class="risk-bar-fill" id="dd-risk-bar" style="width:0%"></div>
@@ -949,36 +886,33 @@ TEMPLATE = r"""
         <div class="risk-breakdown">
           <div class="risk-stat">
             <div class="risk-stat-label">Bad Review Rate</div>
-            <div class="risk-stat-val" id="dd-bad-rate">—</div>
+            <div class="risk-stat-val" id="dd-bad-rate">â€”</div>
           </div>
           <div class="risk-stat">
             <div class="risk-stat-label">Band Average</div>
-            <div class="risk-stat-val" id="dd-band-avg">—</div>
+            <div class="risk-stat-val" id="dd-band-avg">â€”</div>
           </div>
           <div class="risk-stat">
             <div class="risk-stat-label">vs Band Avg</div>
-            <div class="risk-stat-val" id="dd-vs-avg">—</div>
+            <div class="risk-stat-val" id="dd-vs-avg">â€”</div>
           </div>
           <div class="risk-stat">
             <div class="risk-stat-label">Avg Rating</div>
-            <div class="risk-stat-val" id="dd-avg-rating">—</div>
+            <div class="risk-stat-val" id="dd-avg-rating">â€”</div>
           </div>
         </div>
 
-        <!-- Decision Recommendation -->
         <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
           <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">Decision Recommendation</div>
           <div id="dd-recommendation" style="font-size:14px;font-weight:700;"></div>
         </div>
 
-        <!-- Topic Recommendations -->
         <div class="rec-section" id="dd-recs-section" style="display:none;">
-          <div class="rec-title">💡 Improvement Suggestions (from NMF complaint themes)</div>
+          <div class="rec-title">ðŸ’¡ Improvement Suggestions (from NMF complaint themes)</div>
           <div class="rec-chips" id="dd-recs"></div>
         </div>
       </div>
 
-      <!-- Topics + Rating Chart -->
       <div class="chart-row">
         <div class="chart-box" style="flex:1.6;min-width:280px;">
           <div class="chart-title">Complaint Themes (NMF Topic Model)</div>
@@ -989,21 +923,20 @@ TEMPLATE = r"""
           <canvas id="ratingChart" height="200"></canvas>
         </div>
       </div>
-    </div><!-- /drilldown-panel -->
+    </div>
   </div>
 
-</div><!-- /wrap -->
+</div>
 
 <div id="toast">
-  <span id="toast-icon">ℹ</span>
-  <span id="toast-msg">—</span>
+  <span id="toast-icon">â„¹</span>
+  <span id="toast-msg">â€”</span>
 </div>
 
 <script>
 Chart.register(ChartDataLabels);
 const GC='#dbe3ec', TK='#66768a', TT='#1f2937';
 
-/* Quality doughnut */
 new Chart(document.getElementById('qualityChart'),{
   type:'doughnut',
   data:{
@@ -1029,7 +962,6 @@ new Chart(document.getElementById('qualityChart'),{
   }
 });
 
-/* Brand bar chart */
 const allBrands={{ brand_stats | tojson }};
 const brands=allBrands.filter(b=>b.bad_pct>0);
 const bMax=brands.length?Math.ceil(Math.max(...brands.map(b=>b.bad_pct))*1.2/5)*5:100;
@@ -1057,15 +989,13 @@ new Chart(document.getElementById('brandChart'),{
   }
 });
 
-/* Rating chart (rebuilt per product) */
 let ratingChart=null;
 function buildRatingChart(dist){
   if(ratingChart)ratingChart.destroy();
-  // dist keys are strings "1".."5" from the API
   ratingChart=new Chart(document.getElementById('ratingChart'),{
     type:'bar',
     data:{
-      labels:['1★','2★','3★','4★','5★'],
+      labels:['1â˜…','2â˜…','3â˜…','4â˜…','5â˜…'],
       datasets:[{
         data:['1','2','3','4','5'].map(k=>dist[k]??0),
         backgroundColor:['#c65a5a','#de8e8e','#d7b26c','#84b79b','#4c8b6b'],
@@ -1083,9 +1013,8 @@ function buildRatingChart(dist){
   });
 }
 
-/* Toast */
 let toastT;
-function showToast(msg,icon='ℹ'){
+function showToast(msg,icon='â„¹'){
   const el=document.getElementById('toast');
   document.getElementById('toast-msg').textContent=msg;
   document.getElementById('toast-icon').textContent=icon;
@@ -1094,7 +1023,6 @@ function showToast(msg,icon='ℹ'){
   toastT=setTimeout(()=>el.classList.remove('show'),3500);
 }
 
-/* Drilldown */
 function closeDrilldown(){
   document.getElementById('drilldown-panel').classList.remove('visible');
   document.getElementById('drilldown-empty').style.display='';
@@ -1103,7 +1031,7 @@ function closeDrilldown(){
 
 function inspectFromInput(){
   const v=document.getElementById('asin-input').value.trim();
-  if(!v){showToast('Please enter an ASIN first','⚠️');return;}
+  if(!v){showToast('Please enter an ASIN first','âš ï¸');return;}
   inspectAsin(v);
 }
 
@@ -1119,7 +1047,7 @@ async function inspectAsin(asin){
   document.getElementById('inspect-btn').disabled=true;
   try{
     const res=await fetch('/api/product/'+encodeURIComponent(asin));
-    if(!res.ok){showToast('ASIN not found: '+asin,'❌');throw new Error('not found');}
+    if(!res.ok){showToast('ASIN not found: '+asin,'âŒ');throw new Error('not found');}
     const d=await res.json();
     populateDrilldown(d);
     document.getElementById('drilldown-card').scrollIntoView({behavior:'smooth',block:'start'});
@@ -1134,13 +1062,13 @@ async function inspectAsin(asin){
 function populateDrilldown(d){
   document.getElementById('dd-title').textContent=d.title||d.asin;
   document.getElementById('dd-asin').textContent=d.asin;
-  document.getElementById('dd-brand').textContent='🏷 '+(d.brand||'Unknown');
-  document.getElementById('dd-reviews').textContent='📝 '+(d.reviews||0).toLocaleString()+' reviews';
+  document.getElementById('dd-brand').textContent='ðŸ· '+(d.brand||'Unknown');
+  document.getElementById('dd-reviews').textContent='ðŸ“ '+(d.reviews||0).toLocaleString()+' reviews';
   const qb=d.quality_band||'';
   const qEl=document.getElementById('dd-quality-badge');
-  if(qb==='bad_product')qEl.innerHTML='<span class="badge badge-bad">● Bad Product</span>';
-  else if(qb==='good_product')qEl.innerHTML='<span class="badge badge-good">● Good Product</span>';
-  else qEl.innerHTML='<span class="badge badge-mid">● Mid Product</span>';
+  if(qb==='bad_product')qEl.innerHTML='<span class="badge badge-bad">â— Bad Product</span>';
+  else if(qb==='good_product')qEl.innerHTML='<span class="badge badge-good">â— Good Product</span>';
+  else qEl.innerHTML='<span class="badge badge-mid">â— Mid Product</span>';
 
   const score=d.risk_score||0;
   const rsEl=document.getElementById('dd-risk-score');
@@ -1148,7 +1076,7 @@ function populateDrilldown(d){
   rsEl.style.color=d.risk_color||'#fff';
 
   const rlvEl=document.getElementById('dd-risk-level');
-  rlvEl.textContent=d.risk_level||'—';
+  rlvEl.textContent=d.risk_level||'â€”';
   rlvEl.style.background=(d.risk_color||'#888')+'22';
   rlvEl.style.color=d.risk_color||'#888';
   rlvEl.style.border='1px solid '+(d.risk_color||'#888')+'55';
@@ -1164,19 +1092,19 @@ function populateDrilldown(d){
   const brEl=document.getElementById('dd-bad-rate');
   brEl.textContent=d.bad_rate_pct!=null?d.bad_rate_pct+'%':'N/A';
   brEl.style.color=d.risk_color||TT;
-  document.getElementById('dd-band-avg').textContent=(d.band_avg_pct??'—')+'%';
+  document.getElementById('dd-band-avg').textContent=(d.band_avg_pct??'â€”')+'%';
 
   const vsEl=document.getElementById('dd-vs-avg');
   vsEl.innerHTML=d.vs_avg==='better'
-    ?'<span class="vs-chip vs-better">▼ Better than avg</span>'
-    :'<span class="vs-chip vs-worse">▲ Worse than avg</span>';
+    ?'<span class="vs-chip vs-better">â–¼ Better than avg</span>'
+    :'<span class="vs-chip vs-worse">â–² Worse than avg</span>';
 
   const arEl=document.getElementById('dd-avg-rating');
-  arEl.textContent=(d.avg_rating||0).toFixed(2)+'★';
+  arEl.textContent=(d.avg_rating||0).toFixed(2)+'â˜…';
   arEl.style.color=d.avg_rating>=4?'#4c8b6b':d.avg_rating<=2?'#c65a5a':'#b7863d';
 
   const recEl=document.getElementById('dd-recommendation');
-  recEl.textContent=d.recommendation||'—';
+  recEl.textContent=d.recommendation||'â€”';
   recEl.style.color=qb==='bad_product'?'#c65a5a':qb==='good_product'?'#4c8b6b':'#b7863d';
 
   const recs=d.topic_recommendations||[];
@@ -1210,23 +1138,19 @@ function populateDrilldown(d){
 
   buildRatingChart(d.rating_dist||{});
   document.getElementById('drilldown-panel').classList.add('visible');
-  showToast('Loaded: '+d.asin,'✅');
+  showToast('Loaded: '+d.asin,'âœ…');
 }
 
-/* Auto-load if ASIN was in URL */
 (function(){
   const initial='{{ selected.asin | e }}';
   if(initial)inspectAsin(initial);
 })();
 
-/* XAI is now always visible — no toggle needed */
-
-/* Product Comparison — single call to /api/compare, zero NMF */
 async function runCompare(){
   const a1=(document.getElementById('cmp-asin1').value||'').trim();
   const a2=(document.getElementById('cmp-asin2').value||'').trim();
-  if(!a1||!a2){showToast('Please enter both ASINs','\u26a0\ufe0f');return;}
-  if(a1===a2){showToast('Enter two different ASINs','\u26a0\ufe0f');return;}
+  if(!a1||!a2){showToast('Please enter both ASINs','âš ï¸');return;}
+  if(a1===a2){showToast('Enter two different ASINs','âš ï¸');return;}
   const resultEl=document.getElementById('cmp-result');
   const spinner=document.getElementById('cmp-spinner');
   const btn=document.getElementById('cmp-btn');
@@ -1239,20 +1163,19 @@ async function runCompare(){
     if(!res.ok){
       const msg=json.error||'One or both ASINs not found';
       resultEl.innerHTML='<div class="compare-empty" style="color:var(--bad);">'+msg+'</div>';
-      showToast(msg,'\u274c');
+      showToast(msg,'âŒ');
       return;
     }
     resultEl.innerHTML=renderCompare(json.product1,json.product2);
   }catch(err){
     resultEl.innerHTML='<div class="compare-empty" style="color:var(--bad);">Error: '+err.message+'</div>';
-    showToast(err.message,'\u274c');
+    showToast(err.message,'âŒ');
   }finally{
     spinner.style.display='none';
     btn.disabled=false;
   }
 }
 function renderCompare(a,b){
-  /* Determine winner per metric */
   const ratingWin=a.avg_rating>=b.avg_rating?'A':'B';
   const badA=a.bad_rate_pct!=null?a.bad_rate_pct:999;
   const badB=b.bad_rate_pct!=null?b.bad_rate_pct:999;
@@ -1279,27 +1202,27 @@ function renderCompare(a,b){
     return `<div class="compare-card${isOverallWin?' winner':''}">
       <div>
         <div class="compare-card-name" title="${safeTitle}">${safeTitle}</div>
-        <div class="compare-card-asin">${d.asin} &nbsp;·&nbsp; 🏷 ${d.brand||'Unknown'} &nbsp;·&nbsp; 📝 ${(d.reviews||0).toLocaleString()} reviews</div>
+        <div class="compare-card-asin">${d.asin} &nbsp;Â·&nbsp; ðŸ· ${d.brand||'Unknown'} &nbsp;Â·&nbsp; ðŸ“ ${(d.reviews||0).toLocaleString()} reviews</div>
       </div>
       <div class="compare-metrics">
         <div class="compare-metric">
           <div class="compare-metric-label">Avg Rating</div>
-          <div class="compare-metric-val" style="color:${ratingColor(d.avg_rating)}">${(d.avg_rating||0).toFixed(2)}★</div>
-          ${isRatingWin?'<div class="compare-win-tag">▲ Better</div>':''}
+          <div class="compare-metric-val" style="color:${ratingColor(d.avg_rating)}">${(d.avg_rating||0).toFixed(2)}â˜…</div>
+          ${isRatingWin?'<div class="compare-win-tag">â–² Better</div>':''}
         </div>
         <div class="compare-metric">
           <div class="compare-metric-label">Bad Review Rate</div>
           <div class="compare-metric-val" style="color:${badColor(d.bad_rate_pct)}">${badPct}</div>
-          ${isBadWin?'<div class="compare-win-tag">▲ Better</div>':''}
+          ${isBadWin?'<div class="compare-win-tag">â–² Better</div>':''}
         </div>
         <div class="compare-metric">
           <div class="compare-metric-label">Risk Level</div>
           <div class="compare-metric-val" style="font-size:1.1rem;color:${riskColor(d.risk_level||'')}">${d.risk_level||'Unknown'}</div>
-          ${isRiskWin?'<div class="compare-win-tag">▲ Better</div>':''}
+          ${isRiskWin?'<div class="compare-win-tag">â–² Better</div>':''}
         </div>
       </div>
       <div class="compare-rec" style="color:${d.quality_band==='bad_product'?'#c65a5a':d.quality_band==='good_product'?'#4c8b6b':'#b7863d'}">${d.recommendation||''}</div>
-      ${isOverallWin?'<div class="compare-best-label">✓ Recommended pick based on overall metrics</div>':''}
+      ${isOverallWin?'<div class="compare-best-label">âœ“ Recommended pick based on overall metrics</div>':''}
     </div>`;
   }
 
@@ -1309,7 +1232,6 @@ function renderCompare(a,b){
 document.getElementById('cmp-asin1').addEventListener('keydown',e=>{if(e.key==='Enter')runCompare();});
 document.getElementById('cmp-asin2').addEventListener('keydown',e=>{if(e.key==='Enter')runCompare();});
 
-/* Global Insights (async) */
 async function loadGlobalInsights(){
   try{
     const res=await fetch('/api/global-insights');
@@ -1333,13 +1255,13 @@ async function loadGlobalInsights(){
       </div>`).join('');
     el.innerHTML=`
       <div class="insight-box">
-        <div class="insight-label">📦 Quality Band Breakdown</div>
+        <div class="insight-label">ðŸ“¦ Quality Band Breakdown</div>
         <div style="font-size:1rem;font-weight:800;margin-bottom:10px;">${d.dominant_band}</div>
         <div style="font-size:12px;color:var(--muted);margin-bottom:14px;">${(d.dominant_band_count||0).toLocaleString()} products in largest band</div>
         ${bandRows}
       </div>
       <div class="insight-box" style="flex:1.5;">
-        <div class="insight-label">🚨 Top 3 Worst Brands (Bad Product Rate)</div>
+        <div class="insight-label">ðŸš¨ Top 3 Worst Brands (Bad Product Rate)</div>
         ${brandRows||'<p class="muted" style="font-size:13px;">No data available</p>'}
       </div>`;
   }catch(e){
@@ -1353,10 +1275,6 @@ loadGlobalInsights();
 </html>
 """
 
-
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
 
 @app.route("/")
 def home() -> str:
@@ -1386,7 +1304,6 @@ def home() -> str:
     else:
         df = df.sort_values(["reviews", "avg_rating"], ascending=[False, False])
 
-    # Convert to plain Python types for Jinja template
     rows = [_safe_dict(r) for r in df.head(topn).to_dict(orient="records")]
 
     kpis = {
@@ -1425,9 +1342,9 @@ def api_global_insights():
     band_counts = {k: int(v) for k, v in meta["quality_band"].value_counts().to_dict().items()}
     brand_stats = get_brand_stats(meta)
     band_label_map = {
-        "bad_product": "Bad Products (avg ≤ 2.0★)",
-        "mid_product": "Mid-tier Products (avg 2–4★)",
-        "good_product": "Good Products (avg ≥ 4.0★)",
+        "bad_product": "Bad Products (avg â‰¤ 2.0â˜…)",
+        "mid_product": "Mid-tier Products (avg 2â€“4â˜…)",
+        "good_product": "Good Products (avg â‰¥ 4.0â˜…)",
     }
     dominant_band = max(band_counts, key=band_counts.get, default="mid_product")
     return jsonify({
@@ -1443,7 +1360,6 @@ def api_global_insights():
 
 @app.route("/api/compare")
 def api_compare():
-    """Lightweight compare: reads only cached metadata + bad rates. No NMF, no crash."""
     asin1 = request.args.get("asin1", "").strip()
     asin2 = request.args.get("asin2", "").strip()
     if not asin1 or not asin2:
@@ -1479,9 +1395,9 @@ def api_compare():
         else:
             risk_level, risk_color = "HIGH RISK", "#ef4444"
         rec_map = {
-            "bad_product": "\u26a0 Avoid \u2014 high complaint volume.",
-            "mid_product": "\u26a1 Mixed experience \u2014 review before purchasing.",
-            "good_product": "\u2713 Generally reliable.",
+            "bad_product": "âš  Avoid â€” high complaint volume.",
+            "mid_product": "âš¡ Mixed experience â€” review before purchasing.",
+            "good_product": "âœ“ Generally reliable.",
         }
         return {
             "asin": str(row.get("asin", asin)),
@@ -1511,6 +1427,4 @@ def api_compare():
 
 if __name__ == "__main__":
     debug_mode = os.getenv("FLASK_DEBUG", "0") == "1"
-    # threaded=True is critical: compare fires two /api/product requests concurrently.
-    # use_reloader=False prevents the double-process issue that causes terminal instability.
     app.run(host="0.0.0.0", port=5000, debug=debug_mode, use_reloader=False, threaded=True)

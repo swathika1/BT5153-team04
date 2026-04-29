@@ -1,0 +1,370 @@
+     "text": [
+      "Found files: /Users/meghana/Downloads/BT5153-team04-main/electronics_filtered.csv /Users/meghana/Downloads/BT5153-team04-main/electronics_metadata.csv\n",
+      "Row cap for stable execution: 300000\n"
+     ]
+    }
+   ],
+   "source": [
+    "import warnings\n",
+    "warnings.filterwarnings('ignore')\n",
+    "\n",
+    "from pathlib import Path\n",
+--
+     "text": [
+      "Shape: (300000, 9)\n",
+      "Bad review rate (overall<=2): 0.1861\n",
+      "Good review rate (overall>=4): 0.7278\n"
+     ]
+    }
+   ],
+   "source": [
+    "pdf = pd.read_csv(\n",
+    "    DATA_FILE,\n",
+    "    nrows=MAX_ROWS,\n",
+--
+     "text": [
+      "Basic feature summary by rating-driven review group:\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+--
+     "text": [
+      "Product quality band counts:\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+--
+     "text": [
+      "Top bad products (avg_rating <= 2):\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+--
+     "text": [
+      "Top good products (avg_rating >= 4):\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+--
+     "text": [
+      "Product quality artifact preview (ready for teammate use):\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+--
+     "text": [
+      "Bad review sample size for topic models: 50000\n"
+     ]
+    }
+   ],
+   "source": [
+    "bad_reviews = pdf.loc[pdf['is_bad_review'], 'text'].dropna()\n",
+    "bad_reviews = bad_reviews[bad_reviews.str.len() > 30]\n",
+    "\n",
+    "bad_sample = bad_reviews.sample(n=min(MAX_BAD_SAMPLE, len(bad_reviews)), random_state=SEED)\n",
+    "print('Bad review sample size for topic models:', len(bad_sample))"
+--
+     "text": [
+      "LDA and NMF fitted on bad reviews.\n"
+     ]
+    }
+   ],
+   "source": [
+    "n_topics = 12\n",
+    "count_vec = CountVectorizer(min_df=20, max_df=0.7, stop_words='english')\n",
+    "X_bad_count = count_vec.fit_transform(bad_sample)\n",
+    "\n",
+    "lda = LatentDirichletAllocation(\n",
+--
+     "text": [
+      "LDA Topics\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+--
+     "text": [
+      "NMF Topics\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+--
+     "text": [
+      "BERTopic not run: No module named 'bertopic'\n",
+      "This does not block the rest of the notebook.\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Optional: BERTopic on bad reviews, guarded to avoid breaking notebook if package is unavailable.\n",
+    "try:\n",
+    "    from bertopic import BERTopic\n",
+    "    from sentence_transformers import SentenceTransformer\n",
+--
+     "text": [
+      "Handoff table counts by quality band:\n",
+      "quality_band\n",
+      "good_product    453\n",
+      "mid_product     400\n",
+      "Name: count, dtype: int64\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+--
+     "text": [
+      "Top 10 brands by bad review rate (min 200 reviews in sample):\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+--
+     "text": [
+      "Box plot generated: word_len distribution by rating.\n"
+     ]
+    }
+   ],
+   "source": [
+    "import matplotlib.pyplot as plt\n",
+    "from scipy import stats\n",
+    "\n",
+    "# Box plot: word_len distribution by star rating (1-5)\n",
+    "fig, ax = plt.subplots(figsize=(10, 6))\n",
+--
+     "text": [
+      "99th percentile word_len: 522\n",
+      "Rows with word_len capped: 2994\n"
+     ]
+    },
+    {
+     "data": {
+      "text/plain": [
+       "<Figure size 1200x600 with 1 Axes>"
+      ]
+--
+     "text": [
+      "\n",
+      "Summary Statistics:\n",
+      "Bad Reviews (overall ≤ 2):\n",
+      "  Mean word_len: 85.46\n",
+      "  Median word_len: 57.00\n",
+      "  Std Dev: 82.07\n",
+      "\n",
+      "Non-Bad Reviews (overall > 2):\n",
+      "  Mean word_len: 81.62\n",
+      "  Median word_len: 50.00\n",
+--
+     "text": [
+      "Grouped breakdown (verified × rating):\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+--
+     "text": [
+      "Grouped bar chart: proportion of each star rating by verified status.\n"
+     ]
+    }
+   ],
+   "source": [
+    "import matplotlib.pyplot as plt\n",
+    "\n",
+    "# Grouping by verified and overall rating to get counts\n",
+    "groupby_verified_rating = pdf.groupby(['verified', 'overall']).size().reset_index(name='count')\n",
+    "\n",
+--
+     "text": [
+      "Summary Table: Verified vs Unverified Reviews\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+--
+     "text": [
+      "\n",
+      "Key Insights:\n",
+      "Verified reviews: 255958 (85.3%)\n",
+      "Unverified reviews: 44042 (14.7%)\n",
+      "\n",
+      "Rating difference (Verified - Unverified): 0.195 stars\n",
+      "Bad review rate difference: -5.12%\n",
+      "Word length difference: -55.72 words\n"
+     ]
+    }
+--
+     "text": [
+      "Top 20 Bad-Skewed Terms (proportionally higher in bad reviews):\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+--
+     "text": [
+      "\n",
+      "Top 20 Good-Skewed Terms (proportionally higher in non-bad reviews):\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+--
+     "text": [
+      "\n",
+      "Lift Score Interpretation:\n",
+      "  Lift > 1.0: Term appears MORE often in bad reviews\n",
+      "  Lift < 1.0: Term appears LESS often in bad reviews (more in good reviews)\n",
+      "  Bad-skewed range: 11147.14 to 27071.62\n",
+      "  Good-skewed range: 0.0000 to 0.00\n"
+     ]
+    }
+   ],
+   "source": [
+--
+     "text": [
+      "Topic Labeling Framework:\n",
+      "Fill the \"suggested_label\" column with human-readable complaint themes.\n",
+      "Examples: \"Battery Issues\", \"Product Quality\", \"Durability Concerns\", \"Return Policy\"\n",
+      "\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+--
+     "text": [
+      "Dominant Topic Distribution for Bad Reviews (LDA):\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+--
+     "text": [
+      "\n",
+      "Total bad reviews analyzed: 50000\n",
+      "Most common dominant topic: Topic 4 (15.9%)\n",
+      "Least common dominant topic: Topic 11 (2.9%)\n"
+     ]
+    }
+   ],
+   "source": [
+    "import matplotlib.pyplot as plt\n",
+    "\n",
+--
+     "text": [
+      "Chart 1: Top 10 Brands by Bad Review Rate\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+--
+     "text": [
+      "\n",
+      "Chart 2: Brand Quality Profile (Rating vs Bad Review Rate)\n",
+      "Brands analyzed (total_reviews >= 500): 6\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+--
+     "text": [
+      "Quality Band Distribution:\n",
+      "quality_band\n",
+      "good_product    453\n",
+      "mid_product     400\n",
+      "Name: count, dtype: int64\n",
+      "\n",
+      "Correlation (avg_rating vs bad_review_rate): -0.9779\n",
+      "\n",
+      "Polynomial fit (degree 3):\n",
+      "  Coefficients: [ 0.00344135 -0.00582542 -0.34211479  1.41288703]\n",
+--
+     "text": [
+      "====================================================================================================\n",
+      "FINAL INSIGHTS SUMMARY\n",
+      "====================================================================================================\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
